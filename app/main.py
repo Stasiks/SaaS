@@ -11,11 +11,12 @@ from app.api.dependencies import get_db_session
 from app.db.models import Job, JobStatus
 from app.core.broker import broker
 
-# НОВЫЕ ИМПОРТЫ ДЛЯ БД
 from app.db.database import engine, Base
 
-# Подключаем воркеры
 import app.workers.tryon
+
+import os
+from fastapi.responses import FileResponse
 
 setup_logging()
 log = structlog.get_logger()
@@ -33,7 +34,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Virtual Try-On AI SaaS", lifespan=lifespan)
 
-# ... остальной код оставляешь без изменений ...
+@app.get("/", response_class=FileResponse, include_in_schema=False)
+async def serve_admin_dashboard():
+    file_path = os.path.join(os.path.dirname(__file__), "admin.html")
+    return FileResponse(file_path)
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):

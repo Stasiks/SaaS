@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI SaaS | Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-50 min-h-screen text-slate-800 font-sans">
+    <div class="max-w-5xl mx-auto py-10 px-4">
+        <div class="flex justify-between items-center mb-10">
+            <div>
+                <h1 class="text-3xl font-extrabold tracking-tight text-slate-900">SaaS Virtual Try-On</h1>
+                <p class="text-sm text-slate-500 mt-1">Live Processing Dashboard</p>
+            </div>
+            <div class="bg-green-100 text-green-800 text-xs font-semibold px-3 py-1 rounded-full flex items-center">
+                <span class="w-2 h-2 bg-green-500 rounded-full mr-2 animate-pulse"></span>
+                API Online
+            </div>
+        </div>
+
+        <div class="bg-white rounded-2xl shadow-sm border border-slate-100 p-6 mb-8">
+            <h2 class="text-lg font-semibold mb-4">Создать новую задачу (Test Job)</h2>
+            <div class="flex gap-4">
+                <input type="text" id="imageUrl" placeholder="Вставь ссылку на картинку (URL)..." 
+                    class="flex-1 rounded-lg border-slate-200 border px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    value="https://raw.githubusercontent.com/python/pythondotorg/master/static/img/python-logo.png">
+                <button onclick="startJob()" id="submitBtn" 
+                    class="bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-6 rounded-lg transition-colors">
+                    Запустить AI
+                </button>
+            </div>
+        </div>
+
+        <div id="resultArea" class="hidden grid grid-cols-1 md:grid-cols-3 gap-6">
+            
+            <div class="md:col-span-2 bg-white rounded-2xl shadow-sm border border-slate-100 p-6">
+                <div class="flex justify-between items-center mb-6">
+                    <h2 class="text-lg font-semibold">Статус выполнения</h2>
+                    <span id="statusBadge" class="bg-yellow-100 text-yellow-800 text-xs font-semibold px-3 py-1 rounded-full uppercase tracking-wide">
+                        PENDING
+                    </span>
+                </div>
+                
+                <div class="space-y-4">
+                    <div class="flex justify-between text-sm border-b pb-2">
+                        <span class="text-slate-500">Job ID:</span>
+                        <span id="jobIdDisplay" class="font-mono text-slate-900">-</span>
+                    </div>
+                    <div class="flex justify-between text-sm border-b pb-2">
+                        <span class="text-slate-500">Время в системе:</span>
+                        <span id="totalTime" class="font-medium">-</span>
+                    </div>
+                </div>
+
+                <div id="imageContainer" class="mt-6 hidden">
+                    <h3 class="text-sm font-semibold text-slate-500 mb-2">Результат от AI:</h3>
+                    <img id="resultImage" src="" alt="Result" class="rounded-xl border border-slate-200 max-h-64 object-cover">
+                </div>
+            </div>
+
+            <div class="bg-slate-900 rounded-2xl shadow-sm border border-slate-800 p-6 text-white">
+                <h2 class="text-lg font-semibold mb-6 text-slate-100">Метрики (Performance)</h2>
+                
+                <div class="space-y-6">
+                    <div>
+                        <p class="text-xs text-slate-400 mb-1">Сетевой I/O (Download)</p>
+                        <p class="text-2xl font-light"><span id="metricDownload" class="font-semibold">-</span> <span class="text-sm text-slate-500">ms</span></p>
+                    </div>
+                    <div>
+                        <p class="text-xs text-slate-400 mb-1">Rust CPU (Нормализация)</p>
+                        <p class="text-2xl font-light text-blue-400"><span id="metricRust" class="font-semibold">-</span> <span class="text-sm text-slate-500">ms</span></p>
+                    </div>
+                    <div>
+                        <p class="text-xs text-slate-400 mb-1">AI GPU (Инференс)</p>
+                        <p class="text-2xl font-light text-purple-400"><span id="metricAi" class="font-semibold">-</span> <span class="text-sm text-slate-500">ms</span></p>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <script>
+        let pollInterval;
+
+        async function startJob() {
+            const urlInput = document.getElementById('imageUrl').value;
+            const btn = document.getElementById('submitBtn');
+            const resultArea = document.getElementById('resultArea');
+            
+            if (!urlInput) return alert("Введите URL картинки");
+
+            // UI Reset
+            btn.disabled = true;
+            btn.innerText = "Отправка...";
+            resultArea.classList.remove('hidden');
+            document.getElementById('statusBadge').className = "bg-yellow-100 text-yellow-800 text-xs font-semibold px-3 py-1 rounded-full uppercase tracking-wide";
+            document.getElementById('statusBadge').innerText = "PENDING";
+            document.getElementById('imageContainer').classList.add('hidden');
+            ['totalTime', 'metricDownload', 'metricRust', 'metricAi'].forEach(id => document.getElementById(id).innerText = "-");
+
+            try {
+                // Вызов нашего POST API
+                const response = await fetch(`/v1/jobs?original_url=${encodeURIComponent(urlInput)}`, { method: 'POST' });
+                const data = await response.json();
+                
+                document.getElementById('jobIdDisplay').innerText = data.id;
+                btn.innerText = "Обработка...";
+                
+                // Начинаем опрашивать статус каждые 1.5 секунды
+                pollInterval = setInterval(() => checkStatus(data.id), 1500);
+            } catch (err) {
+                alert("Ошибка соединения с API");
+                btn.disabled = false;
+                btn.innerText = "Запустить AI";
+            }
+        }
+
+        async function checkStatus(jobId) {
+            try {
+                // Вызов нашего GET API
+                const response = await fetch(`/v1/status/${jobId}`);
+                const data = await response.json();
+                
+                const badge = document.getElementById('statusBadge');
+                badge.innerText = data.status;
+
+                // Обновляем общее время
+                const timeSec = data.total_time_sec || data.processing_time_sec || data.queue_wait_time_sec || 0;
+                document.getElementById('totalTime').innerText = `${timeSec} сек`;
+
+                if (data.status === 'PROCESSING') {
+                    badge.className = "bg-blue-100 text-blue-800 text-xs font-semibold px-3 py-1 rounded-full uppercase tracking-wide";
+                } 
+                else if (data.status === 'COMPLETED' || data.status === 'FAILED') {
+                    clearInterval(pollInterval); // Останавливаем опрос
+                    
+                    const btn = document.getElementById('submitBtn');
+                    btn.disabled = false;
+                    btn.innerText = "Запустить AI";
+
+                    if (data.status === 'COMPLETED') {
+                        badge.className = "bg-green-100 text-green-800 text-xs font-semibold px-3 py-1 rounded-full uppercase tracking-wide animate-bounce";
+                        
+                        // Показываем картинку
+                        if(data.result_url) {
+                            document.getElementById('resultImage').src = data.result_url;
+                            document.getElementById('imageContainer').classList.remove('hidden');
+                        }
+
+                        // Заполняем красивые метрики
+                        if(data.performance_metrics) {
+                            document.getElementById('metricDownload').innerText = data.performance_metrics.download_ms || "-";
+                            document.getElementById('metricRust').innerText = data.performance_metrics.rust_cpu_ms || "-";
+                            document.getElementById('metricAi').innerText = data.performance_metrics.ai_gpu_ms || "-";
+                        }
+                    } else {
+                        badge.className = "bg-red-100 text-red-800 text-xs font-semibold px-3 py-1 rounded-full uppercase tracking-wide";
+                    }
+                }
+            } catch (err) {
+                console.error("Polling error", err);
+            }
+        }
+    </script>
+</body>
+</html>
