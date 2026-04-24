@@ -11,7 +11,10 @@ from app.api.dependencies import get_db_session
 from app.db.models import Job, JobStatus
 from app.core.broker import broker
 
-# Подключаем воркеры, чтобы TaskIQ их "увидел" при импорте брокера
+# НОВЫЕ ИМПОРТЫ ДЛЯ БД
+from app.db.database import engine, Base
+
+# Подключаем воркеры
 import app.workers.tryon
 
 setup_logging()
@@ -19,12 +22,18 @@ log = structlog.get_logger()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # При старте API не забываем инициализировать брокер
+    # СОЗДАЕМ ТАБЛИЦЫ В БД ПРИ СТАРТЕ
+    log.info("initializing_database")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+        
     await broker.startup()
     yield
     await broker.shutdown()
 
 app = FastAPI(title="Virtual Try-On AI SaaS", lifespan=lifespan)
+
+# ... остальной код оставляешь без изменений ...
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
@@ -71,7 +80,6 @@ async def get_job_status(job_id: uuid.UUID, db: AsyncSession = Depends(get_db_se
 
     return response
 
-# Пример создания задачи (для теста)
 @app.post("/v1/jobs", status_code=202)
 async def create_job(original_url: str, db: AsyncSession = Depends(get_db_session)):
     # 1. Создаем запись в БД
@@ -80,7 +88,8 @@ async def create_job(original_url: str, db: AsyncSession = Depends(get_db_sessio
     await db.commit()
     await db.refresh(new_job)
     
-    # 2. Отправляем в TaskIQ
-    await app.workers.tryon.process_tryon_job.kiq(str(new_job.id))
+    # 2. Отправляем в TaskIQ (обращаемся к импортированному модулю напрямую)
+    from app.workers.tryon import process_tryon_job
+    await process_tryon_job.kiq(str(new_job.id))
     
     return {"id": new_job.id, "status": "PENDING"}
