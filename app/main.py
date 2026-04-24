@@ -1,17 +1,31 @@
+import uuid
 import structlog
-from fastapi import FastAPI, Depends, Request
+from datetime import datetime, timezone
+from fastapi import FastAPI, Depends, Request, HTTPException
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
+from contextlib import asynccontextmanager
+
 from app.core.logger import setup_logging
 from app.api.dependencies import get_db_session
+from app.db.models import Job, JobStatus
+from app.core.broker import broker
 
-# Инициализирование логирования
+# Подключаем воркеры, чтобы TaskIQ их "увидел" при импорте брокера
+import app.workers.tryon
+
 setup_logging()
 log = structlog.get_logger()
 
-app = FastAPI(title="Virtual Try-On AI SaaS")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # При старте API не забываем инициализировать брокер
+    await broker.startup()
+    yield
+    await broker.shutdown()
 
-# Глобальный обработчик ошибок
+app = FastAPI(title="Virtual Try-On AI SaaS", lifespan=lifespan)
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     log.error("unhandled_exception", url=str(request.url), error=str(exc), exc_info=True)
@@ -20,15 +34,53 @@ async def global_exception_handler(request: Request, exc: Exception):
         content={"detail": "Internal server error. We are working on it."}
     )
 
-# Базовый роут Healthcheck
 @app.get("/health")
 async def health_check():
-    log.info("healthcheck_called", status="ok")
     return {"status": "ok", "message": "Systems nominal"}
 
-# Роут с БД
-@app.get("/jobs", status_code=200)
-async def list_jobs(db: AsyncSession = Depends(get_db_session)):
-    log.info("fetch_jobs_started")
-    # Здесь будет вызов к БД: await db.execute(select(Job))
-    return {"message": "Job list will be here"}
+@app.get("/v1/status/{job_id}", status_code=200)
+async def get_job_status(job_id: uuid.UUID, db: AsyncSession = Depends(get_db_session)):
+    log.info("check_status_called", job_id=str(job_id))
+    
+    job = await db.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    # Высчитываем время с момента создания (в секундах)
+    # Приводим к UTC для безопасного сравнения
+    now_utc = datetime.now(timezone.utc)
+    # Предполагаем, что job.created_at сохранено с timezone
+    created_at_utc = job.created_at.replace(tzinfo=timezone.utc) if job.created_at.tzinfo is None else job.created_at
+    
+    time_in_system = round((now_utc - created_at_utc).total_seconds(), 2)
+    
+    response = {
+        "id": job.id,
+        "status": job.status,
+        "created_at": job.created_at,
+        "result_url": job.result_url
+    }
+
+    if job.status == JobStatus.PENDING:
+        response["queue_wait_time_sec"] = time_in_system
+    elif job.status == JobStatus.PROCESSING:
+        response["processing_time_sec"] = time_in_system
+    elif job.status in (JobStatus.COMPLETED, JobStatus.FAILED):
+        response["total_time_sec"] = time_in_system
+        response["performance_metrics"] = job.performance_metrics
+
+    return response
+
+# Пример создания задачи (для теста)
+@app.post("/v1/jobs", status_code=202)
+async def create_job(original_url: str, db: AsyncSession = Depends(get_db_session)):
+    # 1. Создаем запись в БД
+    new_job = Job(original_url=original_url)
+    db.add(new_job)
+    await db.commit()
+    await db.refresh(new_job)
+    
+    # 2. Отправляем в TaskIQ
+    await app.workers.tryon.process_tryon_job.kiq(str(new_job.id))
+    
+    return {"id": new_job.id, "status": "PENDING"}
